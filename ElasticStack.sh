@@ -1,4 +1,4 @@
-# The file shall be executed in SU mode.
+# The file shall be executed as root.
 # Use  sudo -s  or just  sudo <filename>
 #-- Enter password
 # The execution time is extrordinary long, so use tmux just in case.
@@ -11,7 +11,11 @@
 # This command gets the latest tagged version.
 #   export ELKVERSION = `git ls-remote --tags https://github.com/elastic/logstash | tail -n 1 | sed -e "s/^[^ \t]\+[ \t]\+//"`
 # This version was used when the script was developed.
-export ELKVERSION = 6.4.1
+export ELKVERSION=6.4.1
+export LATEST_INSTALLABLE_VERSION=5.6.12
+
+# Raspberry 2 is 32-bit, Raspberry 3 is 64-bit.
+export IS32BIT=true
 
 # The root of the source tree; here some tools also get installed.
 export SRCROOTPATH=~/go
@@ -29,7 +33,7 @@ export ELKHOST=`cat /etc/hostname`
 
 # Get more RAM by creating in-memory zipped swap disks
 if [ ! -f /usr/bin/zram.sh ]; then
-	wget -O /usr/bin/zram.sh https://raw.githubusercontent.com/novaspirit/rpi_zram/master/zram.sh
+	wget -q -O /usr/bin/zram.sh https://raw.githubusercontent.com/novaspirit/rpi_zram/master/zram.sh
 	chmod +x /usr/bin/zram.sh
 fi
 
@@ -41,18 +45,94 @@ fi
 #
 
 # Install Java and tools
-apt-get -qq install -y openjdk-8-jdk curl apt-transport-https ruby ant
+apt-get -qq install -y openjdk-8-jdk curl apt-transport-https ruby
+
+# Install ant 1.9.8+
+set ANT_VERSION=1.9.13
+export ANT_HOME=/usr/bin/ant
+pushd .
+cd ~
+wget -q http://mirrors.rackhosting.com/apache/ant/binaries/apache-ant-$ANT_VERSION-bin.tar.gz
+tar -xzf apache-ant-$ANT_VERSION-bin.tar.gz
+rm apache-ant-$ANT_VERSION-bin.tar.gz
+mkdir $ANT_HOME
+cp -r apache-ant-$ANT_VERSION/bin $ANT_HOME
+cp -r apache-ant-$ANT_VERSION/lib $ANT_HOME
+rm -rf apache-ant-$ANT_VERSION
+popd >/dev/nul
+export PATH=$PATH:$ANT_HOME/bin
 
 # Install Elastic Search
-apt-get -qq install -y elasticsearch@$ELKVERSION
+wget -q https://artifacts.elastic.co/downloads/elasticsearch/elasticsearch-$LATEST_INSTALLABLE_VERSION.deb
+dpkg -i elasticsearch-$LATEST_INSTALLABLE_VERSION.deb
+rm elasticsearch-$LATEST_INSTALLABLE_VERSION.deb
 
 # Set up Elastic Search
-sed -i.original \
+sed -i \
 	-e "s/^.*cluster.name:.*$/cluster.name: \"elastic\"/" \
 	-e "s/^.*node.name:.*$/node.name: \"$ELKHOST\"/" \
 	-e "s/^.*network.host:.*$/network.host: $ELKHOST/" \
+	-e "s/^.*path.logs:.*$/path.logs: \/var\/log\/elasticsearch\//" \
 	/etc/elasticsearch/elasticsearch.yml
+sed -i \
+	-e "s/^-Xms.*$/-Xms200m/" \
+	-e "s/^-Xmx.*$/-Xmx500m/" \
+	-e "s/^[ #]*-Delasticsearch.json.allow_unquoted_field_names.*$/-Delasticsearch.json.allow_unquoted_field_names=true/" \
+	/etc/elasticsearch/jvm.options
+if [ $IS32BIT ]; then
+	# For 32-bit architecture only
+	sed -i \
+		-e "s/^[ #]*-server.*$/#-server/" \
+		-e "s/^[ #]*-Xss.*$/-Xss320k/" \
+		/etc/elasticsearch/jvm.options
+fi
+cat >>/etc/elasticsearch/jvm.options <<EOF
+-Djava.io.tmpdir=/var/lib/elasticsearch/tmp
+-Djna.tmpdir=/var/lib/elasticsearch/tmp
+-Djava.class.path=.:/usr/lib/arm-linux-gnueabihf/jni
+-Djna.nosys=true
+EOF
 sysctl -q -w vm.max_map_count=262144
+
+# This is a strange requirement only applicable to this (and some other?) version,
+# because it lacks something.
+ln -s /etc/elasticsearch/ /usr/share/elasticsearch/config
+
+chown -R elasticsearch:elasticsearch /var/lib/elasticsearch /var/run/elasticsearch /var/log/elasticsearch /etc/elasticsearch
+
+# Recompile JNA
+apt-get -qq install -y autoconf automake libtool libx11-dev libxt-dev
+
+pushd .
+mkdir -p $SRCPATH/jna
+cd $SRCPATH/jna
+git clone https://github.com/java-native-access/jna.git
+# Version 5.2.1
+git checkout dc4c113ca49e98e597ce99ac0af44dcaa62f94c2
+sed -i "s/^.*VERSION_NATIVE.*$/    String VERSION_NATIVE = \"5.1.0\";/" src/com/sun/jna/Version.java
+# Runs for 70-75 minutes
+ant -q dist
+cp dist/*.jar /usr/share/elasticsearch/lib/
+cd ~
+rm -rf $SRCPATH/jna
+mv /usr/share/elasticsearch/lib/jna-4.4.0-1.jar /usr/share/elasticsearch/lib/jna-4.4.0-1.jar.bak
+
+# Recompile JNI library
+cd ~
+mkdir -p com/sun/jna/linux-arm
+cp /usr/lib/arm-linux-gnueabihf/jni/libjnidispatch.so com/sun/jna/linux-arm/
+zip -g /usr/share/elasticsearch/lib/libjnidispatch.jar -r com
+rm -rf com
+popd >/dev/nul
+
+#ln -s /usr/lib/arm-linux-gnueabihf/jni/libjnidispatch.so /usr/lib/jvm/default-java/jre/lib/arm/libjnidispatch.so
+
+# Establish a temporary directory with execution rights
+mkdir -p /var/lib/elasticsearch/tmp
+chown elasticsearch:elasticsearch /var/lib/elasticsearch/tmp
+
+/usr/share/elasticsearch/bin/elasticsearch -V | awk '{ print "Elastic search installed,", $1, $2 }'
+runuser -u elasticsearch /usr/share/elasticsearch/bin/elasticsearch
 
 # Deploy Elastic Search
 cat >/lib/systemd/system/elasticsearch.service <<EOF
@@ -75,8 +155,8 @@ else
 	service elasticsearch restart
 fi
 
-# Wait for 1 minute for the server to start before testing
-sleep 1m
+# Wait for the server to start before testing
+sleep 10m
 echo "Elastic search:" `service elasticsearch status | grep Active | awk '{ print $2 }'`
 curl -s http://$ELKHOST:9200/?pretty
 
@@ -87,14 +167,13 @@ if [ -z `which ruby` ] || [ `ruby -v | awk '{ print $2 }'` != '9.1.10.0' ]; then
 	curl -sSL https://get.rvm.io | bash -s stable --ruby=jruby-9.1.10.0
 fi
 
-# Install older Logstash version, 5.x works with Elastic Search 6.x
-set LATEST_INSTALLABLE_VERSION=5.6.12
+# Install Logstash
 pushd .
 cd ~
 wget https://artifacts.elastic.co/downloads/logstash/logstash-$LATEST_INSTALLABLE_VERSION.deb
 dpkg -i logstash-$LATEST_INSTALLABLE_VERSION.deb
 rm logstash-$LATEST_INSTALLABLE_VERSION.deb
-popd
+popd >/dev/nul
 
 # Install Logstash via DEB - Complains about JRuby
 #wget https://artifacts.elastic.co/downloads/logstash/logstash-$ELKVERSION.deb
@@ -119,7 +198,7 @@ popd
 #export OSS=true
 #apt-get -qq install -y rake bundler
 #rake bootstrap
-#popd
+#popd >/dev/nul
 #rm -rf $SRCPATH/logstash
 
 # Rebuild JFFI library for ARM7
@@ -135,7 +214,7 @@ cp build/jni/libjffi-1.2.so $JRUBYPATH/jni/arm-Linux
 #-- If the .so file is not generated, delete the complete jffi folder and reinstall again
 cd $JRUBYPATH
 zip -q -g jruby-complete-1.7.11.jar jni/arm-Linux/libjffi-1.2.so
-popd
+popd >/dev/nul
 rm -rf $SRCPATH/jnr
 
 # Installation test; logstash takes around 30 minutes to start
@@ -150,6 +229,7 @@ curl -s http://$ELKHOST:9200/logstash-*/_search?pretty | \
 # Setup Logstash
 sed -i.original \
 	-e "s/^.*http.host:.*$/http.host: $ELKHOST/" \
+	-e "s/^.*http.port:.*$/http.port: 9600/" \
 	/etc/logstash/logstash.yml
 
 # Deploy Elastic Search
@@ -160,6 +240,7 @@ else
 	service logstash restart
 fi
 echo "Logstash: " `service logstash status | grep Active | awk '{ print $2 }'`
+curl http://$ELKHOST:9600/?pretty
 
 
 # Install Node.JS via apt-get, only gets the latest version
@@ -173,7 +254,7 @@ wget https://deb.nodesource.com/node_8.x/pool/main/n/nodejs/nodejs_8.11.4-1nodes
 dpkg -i nodejs_8.11.4-1nodesource1_armhf.deb
 rm nodejs_8.11.4-1nodesource1_armhf.deb
 node -v
-popd
+popd >/dev/nul
 
 # Update NPM and pre-install some packages
 apt-get -qq install -y npm
@@ -209,7 +290,7 @@ package.json:
 yarn start --oss
 
 copy
-popd
+popd >/dev/nul
 rm -rf $SRCPATH/kibana
 
 cat >/lib/systemd/system/kibana.service <<EOF
@@ -274,7 +355,7 @@ cp filebeat.yml /etc/filebeat/
 chmod 750 /var/log/filebeat
 chmod 750 /etc/filebeat/
 chown -R root:root /usr/share/filebeat/*
-popd
+popd >/dev/nul
 
 # Deploy Filebeat
 cat >/lib/systemd/system/filebeat.service <<EOF
@@ -290,12 +371,19 @@ Restart=always
 WantedBy=multi-user.target
 EOF
 
-nano /etc/filebeat/filebeat.yml
-#-- Set up Logstash host to $ELKHOST
+sed -i.original \
+	-e "s/^[ \t#]*host:.*:5601.*$/  host: \"$ELKHOST:5601\"/" \
+	-e "s/^[ \t#]*hosts:.*:9200.*$/  #hosts: [\"$ELKHOST:9200\"]/" \
+	-e "s/^[ \t#]*hosts:.*:5043.*$/  hosts: [\"$ELKHOST:5043\"]/" \
+	/etc/filebeat/filebeat.yml
 
-systemctl enable filebeat.service
-service filebeat start
-service filebeat status
+if [ `service filebeat status | grep Active | awk '{ print $2 }'` != 'active' ]; then
+	systemctl enable filebeat.service 2>/dev/nul
+	service filebeat start
+else
+	service filebeat restart
+fi
+echo "Filebeat: " `service filebeat status | grep Active | awk '{ print $2 }'`
 
 
 # Build Metricbeat
@@ -337,5 +425,5 @@ systemctl enable metricbeat.service
 service metricbeat start
 service metricbeat status
 
-popd
+popd >/dev/nul
 rm -rf $SRCPATH/beats
