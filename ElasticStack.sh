@@ -11,7 +11,8 @@
 # This command gets the latest tagged version.
 #   export ELKVERSION = `git ls-remote --tags https://github.com/elastic/logstash | tail -n 1 | sed -e "s/^[^ \t]\+[ \t]\+//"`
 # This version was used when the script was developed.
-export ELKVERSION=6.4.1
+export ELKVERSION=6.4.2
+
 export LATEST_INSTALLABLE_VERSION=5.6.12
 
 # Raspberry 2 is 32-bit, Raspberry 3 is 64-bit.
@@ -39,100 +40,70 @@ fi
 
 /usr/bin/zram.sh
 
+apt-get -qq install -y openjdk-8-jdk curl
+
 
 #
-# Elastic stack: https://logz.io/blog/elk-stack-raspberry-pi/
+# Elastic search
 #
 
-# Install Java and tools
-apt-get -qq install -y openjdk-8-jdk curl apt-transport-https ruby
-
-# Install ant 1.9.8+
-set ANT_VERSION=1.9.13
-export ANT_HOME=/usr/bin/ant
 pushd .
+
+# Get and extract to ~/elasticsearch
 cd ~
-wget -q http://mirrors.rackhosting.com/apache/ant/binaries/apache-ant-$ANT_VERSION-bin.tar.gz
-tar -xzf apache-ant-$ANT_VERSION-bin.tar.gz
-rm apache-ant-$ANT_VERSION-bin.tar.gz
-mkdir $ANT_HOME
-cp -r apache-ant-$ANT_VERSION/bin $ANT_HOME
-cp -r apache-ant-$ANT_VERSION/lib $ANT_HOME
-rm -rf apache-ant-$ANT_VERSION
-popd >/dev/nul
-export PATH=$PATH:$ANT_HOME/bin
+wget https://artifacts.elastic.co/downloads/elasticsearch/elasticsearch-oss-$ELKVERSION.tar.gz
+tar xzvf elasticsearch-oss-$ELKVERSION.tar.gz
+rm elasticsearch-oss-$ELKVERSION.tar.gz
+mv elasticsearch-$ELKVERSION elasticsearch
 
-# Install Elastic Search
-wget -q https://artifacts.elastic.co/downloads/elasticsearch/elasticsearch-$LATEST_INSTALLABLE_VERSION.deb
-dpkg -i elasticsearch-$LATEST_INSTALLABLE_VERSION.deb
-rm elasticsearch-$LATEST_INSTALLABLE_VERSION.deb
+# Fix JNA library
+rm elasticsearch/lib/jna-4.5.1.jar
+wget -O elasticsearch/lib/jna-4.5.2.jar https://repo1.maven.org/maven2/net/java/dev/jna/jna/4.5.2/jna-4.5.2.jar
 
-# Set up Elastic Search
-sed -i \
-	-e "s/^.*cluster.name:.*$/cluster.name: \"elastic\"/" \
-	-e "s/^.*node.name:.*$/node.name: \"$ELKHOST\"/" \
-	-e "s/^.*network.host:.*$/network.host: $ELKHOST/" \
-	-e "s/^.*path.logs:.*$/path.logs: \/var\/log\/elasticsearch\//" \
-	/etc/elasticsearch/elasticsearch.yml
+# Set up JVM
+set JVM_OPT_PATH=elasticsearch/config/jvm.options
 sed -i \
 	-e "s/^-Xms.*$/-Xms200m/" \
 	-e "s/^-Xmx.*$/-Xmx500m/" \
 	-e "s/^[ #]*-Delasticsearch.json.allow_unquoted_field_names.*$/-Delasticsearch.json.allow_unquoted_field_names=true/" \
-	/etc/elasticsearch/jvm.options
+	$JVM_OPT_PATH
 if [ $IS32BIT ]; then
 	# For 32-bit architecture only
 	sed -i \
 		-e "s/^[ #]*-server.*$/#-server/" \
 		-e "s/^[ #]*-Xss.*$/-Xss320k/" \
-		/etc/elasticsearch/jvm.options
+		$JVM_OPT_PATH
 fi
-cat >>/etc/elasticsearch/jvm.options <<EOF
--Djava.io.tmpdir=/var/lib/elasticsearch/tmp
--Djna.tmpdir=/var/lib/elasticsearch/tmp
--Djava.class.path=.:/usr/lib/arm-linux-gnueabihf/jni
--Djna.nosys=true
-EOF
 sysctl -q -w vm.max_map_count=262144
 
-# This is a strange requirement only applicable to this (and some other?) version,
-# because it lacks something.
-ln -s /etc/elasticsearch/ /usr/share/elasticsearch/config
+# Set up Elastic Search
+export ES_YML_PATH=elasticsearch/config/elasticsearch.yml
+sed -i \
+	-e "s/^.*cluster.name:.*$/cluster.name: \"elastic\"/" \
+	-e "s/^.*node.name:.*$/node.name: \"$ELKHOST\"/" \
+	-e "s/^.*network.host:.*$/network.host: 0.0.0.0/" \
+	-e "s/^.*path.logs:.*$/path.logs: \/var\/log\/elasticsearch\//" \
+	$ES_YML_PATH
+cat >>$ES_YML_PATH <<EOF
+# Cortesy Matthias Blaesing <mblaesing@doppel-helix.eu>
+# Disable seccomp protection 
+# (not sure if necessary, but is not supported on arm anyway)
+bootstrap.system_call_filter: false
+# Prevent bootstrap checks, which errs and stops the server
+discovery.type: single-node
+EOF
 
-chown -R elasticsearch:elasticsearch /var/lib/elasticsearch /var/run/elasticsearch /var/log/elasticsearch /etc/elasticsearch
+# Move to common place
+mv elasticsearch /usr/bin/
+mkdir -p /var/log/elasticsearch
+chown -R elasticsearch:elasticsearch /var/log/elasticsearch /usr/bin/elasticsearch
 
-# Recompile JNA
-apt-get -qq install -y autoconf automake libtool libx11-dev libxt-dev
-
-pushd .
-mkdir -p $SRCPATH/jna
-cd $SRCPATH/jna
-git clone https://github.com/java-native-access/jna.git
-# Version 5.2.1
-git checkout dc4c113ca49e98e597ce99ac0af44dcaa62f94c2
-sed -i "s/^.*VERSION_NATIVE.*$/    String VERSION_NATIVE = \"5.1.0\";/" src/com/sun/jna/Version.java
-# Runs for 70-75 minutes
-ant -q dist
-cp dist/*.jar /usr/share/elasticsearch/lib/
-cd ~
-rm -rf $SRCPATH/jna
-mv /usr/share/elasticsearch/lib/jna-4.4.0-1.jar /usr/share/elasticsearch/lib/jna-4.4.0-1.jar.bak
-
-# Recompile JNI library
-cd ~
-mkdir -p com/sun/jna/linux-arm
-cp /usr/lib/arm-linux-gnueabihf/jni/libjnidispatch.so com/sun/jna/linux-arm/
-zip -g /usr/share/elasticsearch/lib/libjnidispatch.jar -r com
-rm -rf com
 popd >/dev/nul
 
-#ln -s /usr/lib/arm-linux-gnueabihf/jni/libjnidispatch.so /usr/lib/jvm/default-java/jre/lib/arm/libjnidispatch.so
-
-# Establish a temporary directory with execution rights
-mkdir -p /var/lib/elasticsearch/tmp
-chown elasticsearch:elasticsearch /var/lib/elasticsearch/tmp
-
-/usr/share/elasticsearch/bin/elasticsearch -V | awk '{ print "Elastic search installed,", $1, $2 }'
-runuser -u elasticsearch /usr/share/elasticsearch/bin/elasticsearch
+# Test
+runuser -u elasticsearch /usr/bin/elasticsearch/bin/elasticsearch -V | awk '{ print "Elastic search installed,", $1, $2 }'
+# Takes around 10 minutes
+#runuser -u elasticsearch /usr/bin/elasticsearch/bin/elasticsearch
 
 # Deploy Elastic Search
 cat >/lib/systemd/system/elasticsearch.service <<EOF
@@ -142,7 +113,8 @@ Documentation=https://www.elastic.co/guide/en/elasticsearch/current/index.html
 Wants=network-online.target
 After=network-online.target
 [Service]
-ExecStart=/usr/share/elasticsearch/bin/elasticsearch
+User=elasticsearch
+ExecStart=/usr/bin/elasticsearch/bin/elasticsearch
 Restart=always
 [Install]
 WantedBy=multi-user.target
@@ -156,9 +128,10 @@ else
 fi
 
 # Wait for the server to start before testing
-sleep 10m
 echo "Elastic search:" `service elasticsearch status | grep Active | awk '{ print $2 }'`
+sleep 10m
 curl -s http://$ELKHOST:9200/?pretty
+
 
 
 # Install JRuby via RVM
@@ -170,9 +143,10 @@ fi
 # Install Logstash
 pushd .
 cd ~
-wget https://artifacts.elastic.co/downloads/logstash/logstash-$LATEST_INSTALLABLE_VERSION.deb
-dpkg -i logstash-$LATEST_INSTALLABLE_VERSION.deb
-rm logstash-$LATEST_INSTALLABLE_VERSION.deb
+wget https://artifacts.elastic.co/downloads/logstash/logstash-oss-$ELKVERSION.deb
+#wget https://artifacts.elastic.co/downloads/logstash/logstash-$LATEST_INSTALLABLE_VERSION.deb
+dpkg -i logstash-$ELKVERSION.deb
+rm logstash-$ELKVERSION.deb
 popd >/dev/nul
 
 # Install Logstash via DEB - Complains about JRuby
@@ -266,7 +240,13 @@ curl -sL https://dl.yarnpkg.com/debian/pubkey.gpg | apt-key add -
 echo "deb https://dl.yarnpkg.com/debian/ stable main" | tee /etc/apt/sources.list.d/yarn.list
 apt-get -qq update && apt-get -qq install -y yarn
 
-# Install Kibana
+
+
+#
+# Install Kibana from https://www.elastic.co/downloads/kibana-oss
+#
+
+https://www.elastic.co/downloads/kibana-oss
 # From source get the needed version
 pushd .
 mkdir -p $SRCPATH
