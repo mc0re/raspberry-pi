@@ -13,8 +13,6 @@
 # This version was used when the script was developed.
 export ELKVERSION=6.4.2
 
-export LATEST_INSTALLABLE_VERSION=5.6.12
-
 # Raspberry 2 is 32-bit, Raspberry 3 is 64-bit.
 export IS32BIT=true
 
@@ -27,38 +25,60 @@ export SRCPATH=$SRCROOTPATH/src/github.com/elastic
 # This machine's name, not actual IP, as otherwise it'll be inaccessible from the outside.
 export ELKHOST=`cat /etc/hostname`
 
+export BEATSPORT=5043
 
 #
 # Install tools
 #
 
+echo "Installing tools."
+
 # Get more RAM by creating in-memory zipped swap disks
 if [ ! -f /usr/bin/zram.sh ]; then
-	wget -q -O /usr/bin/zram.sh https://raw.githubusercontent.com/novaspirit/rpi_zram/master/zram.sh
+	wget -O /usr/bin/zram.sh https://raw.githubusercontent.com/novaspirit/rpi_zram/master/zram.sh -q --show-progress
 	chmod +x /usr/bin/zram.sh
 fi
 
-/usr/bin/zram.sh
+cat >/lib/systemd/system/zram.service <<EOF
+[Unit]
+Description=ZRam swap
+Documentation=https://github.com/novaspirit/rpi_zram
+[Service]
+Type=oneshot
+ExecStart=-/usr/bin/zram.sh
+ExecStop=-/sbin/swapoff -a
+RemainAfterExit=true
+[Install]
+WantedBy=multi-user.target
+EOF
 
-apt-get -qq install -y openjdk-8-jdk curl
+if [ `service zram status | grep Active | awk '{ print $2 }'` != 'active' ]; then
+	systemctl enable zram.service 2>/dev/nul
+	service zram start
+else
+	service zram restart
+fi
+
+apt-get -qq install -y openjdk-8-jdk curl >/dev/nul
 
 
 #
 # Elastic search
 #
 
+echo "Installing Elastic search $ELKVERSION."
 pushd .
 
 # Get and extract to ~/elasticsearch
 cd ~
-wget https://artifacts.elastic.co/downloads/elasticsearch/elasticsearch-oss-$ELKVERSION.tar.gz
-tar xzvf elasticsearch-oss-$ELKVERSION.tar.gz
+wget https://artifacts.elastic.co/downloads/elasticsearch/elasticsearch-oss-$ELKVERSION.tar.gz -q --show-progress
+tar xzf elasticsearch-oss-$ELKVERSION.tar.gz
 rm elasticsearch-oss-$ELKVERSION.tar.gz
 mv elasticsearch-$ELKVERSION elasticsearch
 
 # Fix JNA library
 rm elasticsearch/lib/jna-4.5.1.jar
-wget -O elasticsearch/lib/jna-4.5.2.jar https://repo1.maven.org/maven2/net/java/dev/jna/jna/4.5.2/jna-4.5.2.jar
+wget -O elasticsearch/lib/jna-4.5.2.jar https://repo1.maven.org/maven2/net/java/dev/jna/jna/4.5.2/jna-4.5.2.jar -q --show-progress
 
 # Set up JVM
 set JVM_OPT_PATH=elasticsearch/config/jvm.options
@@ -82,6 +102,7 @@ sed -i \
 	-e "s/^.*cluster.name:.*$/cluster.name: \"elastic\"/" \
 	-e "s/^.*node.name:.*$/node.name: \"$ELKHOST\"/" \
 	-e "s/^.*network.host:.*$/network.host: 0.0.0.0/" \
+	-e "s/^.*path.data:.*$/path.data: \/media\/elasticsearch\//" \
 	-e "s/^.*path.logs:.*$/path.logs: \/var\/log\/elasticsearch\//" \
 	$ES_YML_PATH
 cat >>$ES_YML_PATH <<EOF
@@ -96,14 +117,14 @@ EOF
 # Move to common place
 mv elasticsearch /usr/bin/
 mkdir -p /var/log/elasticsearch
-chown -R elasticsearch:elasticsearch /var/log/elasticsearch /usr/bin/elasticsearch
+mkdir -p /media/elasticsearch
+adduser --system --group --home /media/elasticsearch --quiet logstash
+chown -R elasticsearch:elasticsearch /var/log/elasticsearch /usr/bin/elasticsearch /media/elasticsearch
 
 popd >/dev/nul
 
 # Test
 runuser -u elasticsearch /usr/bin/elasticsearch/bin/elasticsearch -V | awk '{ print "Elastic search installed,", $1, $2 }'
-# Takes around 10 minutes
-#runuser -u elasticsearch /usr/bin/elasticsearch/bin/elasticsearch
 
 # Deploy Elastic Search
 cat >/lib/systemd/system/elasticsearch.service <<EOF
@@ -128,94 +149,175 @@ else
 fi
 
 # Wait for the server to start before testing
-echo "Elastic search:" `service elasticsearch status | grep Active | awk '{ print $2 }'`
+echo "Elastic search service:" `service elasticsearch status | grep Active | awk '{ print $2 }'`
+echo "Waiting for 10 minutes for initialization."
 sleep 10m
-curl -s http://$ELKHOST:9200/?pretty
+echo "Elastic search status: " `curl -s http://$ELKHOST:9200/_cat/health | awk '{ print $4 }'`
 
 
+#
+# Logstash
+#
 
-# Install JRuby via RVM
+# Install JRuby via RVM for compiling JFFI library
+echo "Installing tools for Logstash."
+apt-get -qq install -y ant texinfo >/dev/nul
+export PATH=$PATH:/usr/bin/ant/bin/
+
 if [ -z `which ruby` ] || [ `ruby -v | awk '{ print $2 }'` != '9.1.10.0' ]; then
 	gpg --keyserver hkp://keys.gnupg.net --recv-keys 409B6B1796C275462A1703113804BB82D39DC0E3
 	curl -sSL https://get.rvm.io | bash -s stable --ruby=jruby-9.1.10.0
 fi
 
 # Install Logstash
+echo "Installing Logstash $ELKVERSION."
 pushd .
+
 cd ~
-wget https://artifacts.elastic.co/downloads/logstash/logstash-oss-$ELKVERSION.deb
-#wget https://artifacts.elastic.co/downloads/logstash/logstash-$LATEST_INSTALLABLE_VERSION.deb
-dpkg -i logstash-$ELKVERSION.deb
-rm logstash-$ELKVERSION.deb
-popd >/dev/nul
-
-# Install Logstash via DEB - Complains about JRuby
-#wget https://artifacts.elastic.co/downloads/logstash/logstash-$ELKVERSION.deb
-#dpkg -i logstash-$ELKVERSION.deb
-#-- Complains about JRuby
-#rm logstash-$ELKVERSION.deb
-
-# Install Logstash from APT - Cannot find armhf architecture
-#wget -qO - https://artifacts.elastic.co/GPG-KEY-elasticsearch | sudo apt-key add -
-#echo "deb https://artifacts.elastic.co/packages/6.x/apt stable main" | tee -a /etc/apt/sources.list.d/elastic-6.x.list
-#apt-get update
-#-- Cannot find armhf architecture
-#apt-get install -y logstash@$ELKVERSION
-
-# Install Logstash from source code - Very many troubles compiling it, and to no avail.
-#pushd .
-#mkdir -p $SRCPATH
-#cd $SRCPATH
-#git clone https://github.com/elastic/logstash.git
-#cd logstash
-#git checkout $ELKVERSION
-#export OSS=true
-#apt-get -qq install -y rake bundler
-#rake bootstrap
-#popd >/dev/nul
-#rm -rf $SRCPATH/logstash
+wget https://artifacts.elastic.co/downloads/logstash/logstash-oss-$ELKVERSION.deb -q --show-progress
+tar xzf logstash-oss-$ELKVERSION.tar.gz
+rm logstash-oss-$ELKVERSION.tar.gz
+mv logstash-$ELKVERSION logstash
 
 # Rebuild JFFI library for ARM7
-export JRUBYPATH=/usr/share/logstash/vendor/jruby/lib
+echo "Fixing JFFI library."
+export JRUBYPATH=`pwd`/logstash/vendor/jruby/lib
 pushd .
 mkdir -p $SRCPATH/jnr
 cd $SRCPATH/jnr
 git clone --quiet https://github.com/jnr/jffi.git
 cd jffi
+git checkout 31547346513f6c7a35568903c47b0a3f6383035d
 ant -q jar
 mkdir -p $JRUBYPATH/jni/arm-Linux
 cp build/jni/libjffi-1.2.so $JRUBYPATH/jni/arm-Linux
-#-- If the .so file is not generated, delete the complete jffi folder and reinstall again
 cd $JRUBYPATH
-zip -q -g jruby-complete-1.7.11.jar jni/arm-Linux/libjffi-1.2.so
+zip -q -g jruby.jar jni/arm-Linux/libjffi-1.2.so
+zip -q -g logstash/logstash-core/lib/jars/jruby-complete-9.1.13.0.jar jni/arm-Linux/libjffi-1.2.so
 popd >/dev/nul
 rm -rf $SRCPATH/jnr
 
-# Installation test; logstash takes around 30 minutes to start
-echo "Logstash is installed and running" | \
-	/usr/share/logstash/bin/logstash -e "input { stdin { } } output { elasticsearch { hosts => [\"$ELKHOST:9200\"] } }"
-curl -s http://$ELKHOST:9200/logstash-*/_search?pretty | \
-	grep "Logstash is installed and running" | \
-	tail -n 1 | \
-	awk -F ',' '{ print $4 ":" $5 }' | \
-	awk -F ':' '{ gsub(/"/, "", $2); gsub(/"/, "", $4); gsub(/["}]/, "", $6); print $2 ":" $3 ":" $4 ":", $6 }'
+# Set up JVM
+set JVM_OPT_PATH=logstash/config/jvm.options
+sed -i \
+	-e "s/^-Xms.*$/-Xms256m/" \
+	-e "s/^-Xmx.*$/-Xmx256m/" \
+	-e "s/^.*-Djava\.io\.tmpdir.*$/-Djava.io.tmpdir=\/media\/logstash\/tmp/" \
+	$JVM_OPT_PATH
+mkdir -p /media/logstash/tmp
 
 # Setup Logstash
-sed -i.original \
-	-e "s/^.*http.host:.*$/http.host: $ELKHOST/" \
+export LS_YML_PATH=logstash/config/logstash.yml
+sed -i \
+	-e "s/^.*node.name:.*$/node.name: \"$ELKHOST\"/" \
+	-e "s/^.*http.host:.*$/http.host: \"0.0.0.0\"/" \
 	-e "s/^.*http.port:.*$/http.port: 9600/" \
-	/etc/logstash/logstash.yml
+	-e "s/^.*path.logs:.*$/path.logs: \/var\/log\/logstash\//" \
+	$LS_YML_PATH
+mkdir -p /var/log/logstash
+
+# Move to common place
+mv logstash /usr/bin/
+popd >/dev/nul
+
+adduser --system --group --home /media/logstash --quiet logstash
+chown -R logstash:logstash /var/log/logstash /usr/bin/logstash /media/logstash
+#setfacl -Rm d:u:logstash:rwX,u:logstash:rwX /media/logstash
+
+# Installation and communication test
+echo "Installation test, wait for 1 hour - JVM start-up time."
+echo "`date`: Logstash $ELKVERSION is installed and running" | \
+	runuser -u logstash -- \
+	/usr/bin/logstash/bin/logstash -e "input { stdin { } } output { elasticsearch { hosts => [\"$ELKHOST:9200\"] } }"
+curl -s http://$ELKHOST:9200/logstash-*/_search?pretty | \
+	grep "is installed and running" | \
+	tail -n 1
+set ENTRYID=`curl -s http://$ELKHOST:9200/logstash-*/_search?pretty | grep "_id" | awk '{ gsub(/[",]/, "", $3); print $3 }'`
+curl -X DELETE "$ELKHOST:9200/logstash-`date +%Y.%m.%d`/_doc/$ENTRYID?pretty"
+	
+# Set up pipelines
+mkdir -p /etc/logstash/conf.d
+chown -R logstash:logstash /etc/logstash/conf.d
+cat >/etc/logstash/conf.d/beat.conf <<EOF
+input {
+  beats { port => "$BEATSPORT" }
+}
+output {
+  elasticsearch {
+    hosts => ["$ELKHOST:9200"]
+    index => "%{[@metadata][beat]-%{+YYYY.MM.dd}}"
+  }
+}
+EOF
+
+chmod o+r /var/log/syslog
+cat >/etc/logstash/conf.d/syslog.conf <<EOF
+input {
+  file {
+    path => "/var/log/syslog"
+    type => "syslog"
+  }
+}
+filter {
+  if [type] == "syslog" {
+    grok {
+      match => { "message" => "%{SYSLOGTIMESTAMP:syslog_timestamp} %{SYSLOGHOST:syslog_hostname} %{DATA:syslog_program}(?:\[%{POSINT:syslog_pid}\])?: %{GREEDYDATA:syslog_message}" }
+      add_field => [ "received_at", "%{@timestamp}" ]
+      add_field => [ "received_from", "%{host}" ]
+    }
+    date {
+      match => [ "syslog_timestamp", "MMM  d HH:mm:ss", "MMM dd HH:mm:ss" ]
+    }
+  }
+}
+output {
+  if [message] =~ /elasticsearch.*\[INFO/ {
+  } else {
+    elasticsearch {
+      hosts => ["$ELKHOST:9200"]
+      index => "syslog-%{+YYYY.MM.dd}"
+	}
+  }
+}
+EOF
+
+cat >>/usr/bin/logstash/config/pipelines.yml <<EOF
+ - pipeline.id: beats
+   path.config: "/etc/logstash/conf.d/beat.conf"
+ - pipeline.id: syslog
+   path.config: "/etc/logstash/conf.d/syslog.conf"
+EOF
 
 # Deploy Elastic Search
+cat >/lib/systemd/system/logstash.service <<EOF
+[Unit]
+Description=Logstash
+Documentation=https://www.elastic.co/guide/en/logstash/current/index.html
+Wants=network-online.target
+After=network-online.target
+[Service]
+User=logstash
+ExecStart=/usr/bin/logstash/bin/logstash -r --config.reload.interval 1m
+Restart=always
+[Install]
+WantedBy=multi-user.target
+EOF
+
 if [ `service logstash status | grep Active | awk '{ print $2 }'` != 'active' ]; then
 	systemctl enable logstash.service 2>/dev/nul
 	service logstash start
 else
 	service logstash restart
 fi
-echo "Logstash: " `service logstash status | grep Active | awk '{ print $2 }'`
+echo "Logstash service: " `service logstash status | grep Active | awk '{ print $2 }'`
+echo "Waiting for 1 hour for initialization, then a JSON text shall be printed."
+sleep 60m
 curl http://$ELKHOST:9600/?pretty
 
+
+#
+# Kibana
+#
 
 # Install Node.JS via apt-get, only gets the latest version
 #curl -sL https://deb.nodesource.com/setup_8.x | sudo -E bash -
@@ -231,23 +333,16 @@ node -v
 popd >/dev/nul
 
 # Update NPM and pre-install some packages
-apt-get -qq install -y npm
+apt-get -qq install -y npm >/dev/nul
 npm install npm -g
 npm install -g eslint-plugin-import@2.8.0
 
 # Install Yarn
 curl -sL https://dl.yarnpkg.com/debian/pubkey.gpg | apt-key add -
 echo "deb https://dl.yarnpkg.com/debian/ stable main" | tee /etc/apt/sources.list.d/yarn.list
-apt-get -qq update && apt-get -qq install -y yarn
+apt-get -qq update && apt-get -qq install -y yarn >/dev/nul
 
-
-
-#
 # Install Kibana from https://www.elastic.co/downloads/kibana-oss
-#
-
-https://www.elastic.co/downloads/kibana-oss
-# From source get the needed version
 pushd .
 mkdir -p $SRCPATH
 cd $SRCPATH
@@ -308,7 +403,7 @@ export PATH=$PATH:/usr/local/go/bin:$SRCROOTPATH/bin
 go version
 
 # Install other tools
-apt-get -qq install -y git gcc make python-pip
+apt-get -qq install -y git gcc make python-pip >/dev/nul
 pip install virtualenv
 go get github.com/magefile/mage
 
@@ -351,10 +446,13 @@ Restart=always
 WantedBy=multi-user.target
 EOF
 
-sed -i.original \
-	-e "s/^[ \t#]*host:.*:5601.*$/  host: \"$ELKHOST:5601\"/" \
+sed -i \
+	-e "s/^[ \t#]*- \/var\/log\/.*$/    - \/var\/log\/syslog/" \
+	-e "s/^[ \t#]*output.elasticsearch:.*$/#output.elasticsearch:/" \
 	-e "s/^[ \t#]*hosts:.*:9200.*$/  #hosts: [\"$ELKHOST:9200\"]/" \
-	-e "s/^[ \t#]*hosts:.*:5043.*$/  hosts: [\"$ELKHOST:5043\"]/" \
+	-e "s/^[ \t#]*output.logstash:*.$/output.logstash:/" \
+	-e "s/^[ \t#]*hosts:.*:$BEATSPORT.*$/  hosts: [\"$ELKHOST:$BEATSPORT\"]/" \
+	-e "s/^[ \t#]*host:.*:5601.*$/  host: \"$ELKHOST:5601\"/" \
 	/etc/filebeat/filebeat.yml
 
 if [ `service filebeat status | grep Active | awk '{ print $2 }'` != 'active' ]; then
