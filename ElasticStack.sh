@@ -34,33 +34,53 @@ export BEATSPORT=5043
 echo "Installing tools."
 
 # Get more RAM by creating in-memory zipped swap disks
-if [ ! -f /usr/bin/zram.sh ]; then
-	wget -O /usr/bin/zram.sh https://raw.githubusercontent.com/novaspirit/rpi_zram/master/zram.sh -q --show-progress
-	chmod +x /usr/bin/zram.sh
+# from https://github.com/novaspirit/rpi_zram
+#if [ ! -f /usr/bin/zram.sh ]; then
+#	wget -O /usr/bin/zram.sh https://raw.githubusercontent.com/novaspirit/rpi_zram/master/zram.sh -q --show-progress
+#	chmod +x /usr/bin/zram.sh
+#fi
+
+# Get more RAM by creating in-memory zipped swap disks
+# from https://github.com/rhinstaller/anaconda
+if [ ! -f /usr/bin/zramswapon.sh ]; then
+	wget -O /usr/bin/zramswapon.sh https://github.com/rhinstaller/anaconda/raw/master/scripts/zramswapon -q --show-progress
+	wget -O /usr/bin/zramswapoff.sh https://github.com/rhinstaller/anaconda/raw/master/scripts/zramswapoff -q --show-progress
+	chmod +x /usr/bin/zramswapon.sh
+	chmod +x /usr/bin/zramswapoff.sh
 fi
 
 cat >/lib/systemd/system/zram.service <<EOF
 [Unit]
 Description=ZRam swap
-Documentation=https://github.com/novaspirit/rpi_zram
+Documentation=https://github.com/rhinstaller/anaconda
 [Service]
 Type=oneshot
-ExecStart=-/usr/bin/zram.sh
-ExecStop=-/sbin/swapoff -a
+ExecStart=-/usr/bin/zramswapon.sh
+ExecStop=-/usr/bin/zramswapoff.sh
 RemainAfterExit=true
 [Install]
 WantedBy=multi-user.target
 EOF
 
 if [ `service zram status | grep Active | awk '{ print $2 }'` != 'active' ]; then
-	systemctl enable zram.service 2>/dev/nul
+	systemctl enable zram.service 2>/dev/null
 	service zram start
 else
 	service zram restart
 fi
 
-apt-get -qq install -y oracle-java8-jdk curl >/dev/nul
-update-java-alternatives -s jdk-8-oracle-arm32-vfp-hflt >/dev/nul
+# Increase randomness
+apt-get -qq install -y haveged >/dev/null
+sed -i \
+	-e "s/DAEMON_ARGS=\"\"/DAEMON_ARGS=\"-w 8192\"/" \
+	/etc/init.d/haveged
+update-rc.d haveged defaults
+# Test
+echo "Generation speed must be over 50"
+dd if=/dev/random of=/dev/null bs=1024 count=1 iflag=fullblock 2>&1 | tail -n 1 | awk -F , '{ print $3 }' | awk '{ print $1 }'
+
+apt-get -qq install -y oracle-java8-jdk curl >/dev/null
+update-java-alternatives -s jdk-8-oracle-arm32-vfp-hflt >/dev/null
 
 
 #
@@ -122,7 +142,7 @@ mkdir -p /media/elasticsearch
 adduser --system --group --home /media/elasticsearch --quiet logstash
 chown -R elasticsearch:elasticsearch /var/log/elasticsearch /usr/bin/elasticsearch /media/elasticsearch
 
-popd >/dev/nul
+popd >/dev/null
 
 # Test
 runuser -u elasticsearch /usr/bin/elasticsearch/bin/elasticsearch -V | awk '{ print "Elastic search installed,", $1, $2 }'
@@ -143,7 +163,7 @@ WantedBy=multi-user.target
 EOF
 
 if [ `service elasticsearch status | grep Active | awk '{ print $2 }'` != 'active' ]; then
-	systemctl enable elasticsearch.service 2>/dev/nul
+	systemctl enable elasticsearch.service 2>/dev/null
 	service elasticsearch start
 else
 	service elasticsearch restart
@@ -161,7 +181,7 @@ echo "Elastic search status: " `curl -s http://$ELKHOST:9200/_cat/health | awk '
 
 # Install JRuby via RVM for compiling JFFI library
 echo "Installing tools for Logstash."
-apt-get -qq install -y ant texinfo >/dev/nul
+apt-get -qq install -y ant texinfo >/dev/null
 export PATH=$PATH:/usr/bin/ant/bin/
 
 if [ -z `which ruby` ] || [ `ruby -v | awk '{ print $2 }'` != '9.1.10.0' ]; then
@@ -194,7 +214,7 @@ cp build/jni/libjffi-1.2.so $JRUBYPATH/jni/arm-Linux
 cd $JRUBYPATH
 zip -q -g jruby.jar jni/arm-Linux/libjffi-1.2.so
 zip -q -g logstash/logstash-core/lib/jars/jruby-complete-9.1.13.0.jar jni/arm-Linux/libjffi-1.2.so
-popd >/dev/nul
+popd >/dev/null
 rm -rf $SRCPATH/jnr
 
 # Set up JVM
@@ -218,7 +238,7 @@ mkdir -p /var/log/logstash
 
 # Move to common place
 mv logstash /usr/bin/
-popd >/dev/nul
+popd >/dev/null
 
 adduser --system --group --home /media/logstash --quiet logstash
 chown -R logstash:logstash /var/log/logstash /usr/bin/logstash /media/logstash
@@ -315,7 +335,7 @@ WantedBy=multi-user.target
 EOF
 
 if [ `service logstash status | grep Active | awk '{ print $2 }'` != 'active' ]; then
-	systemctl enable logstash.service 2>/dev/nul
+	systemctl enable logstash.service 2>/dev/null
 	service logstash start
 else
 	service logstash restart
@@ -327,6 +347,13 @@ curl http://$ELKHOST:9600/?pretty
 
 
 exit
+
+#
+# Curator - for data clean-up
+# From https://www.elastic.co/guide/en/elasticsearch/client/curator/current/index.html
+#
+
+
 #
 # Kibana
 #
@@ -342,17 +369,17 @@ wget https://deb.nodesource.com/node_8.x/pool/main/n/nodejs/nodejs_8.11.4-1nodes
 dpkg -i nodejs_8.11.4-1nodesource1_armhf.deb
 rm nodejs_8.11.4-1nodesource1_armhf.deb
 node -v
-popd >/dev/nul
+popd >/dev/null
 
 # Update NPM and pre-install some packages
-apt-get -qq install -y npm >/dev/nul
+apt-get -qq install -y npm >/dev/null
 npm install npm -g
 npm install -g eslint-plugin-import@2.8.0
 
 # Install Yarn
 curl -sL https://dl.yarnpkg.com/debian/pubkey.gpg | apt-key add -
 echo "deb https://dl.yarnpkg.com/debian/ stable main" | tee /etc/apt/sources.list.d/yarn.list
-apt-get -qq update && apt-get -qq install -y yarn >/dev/nul
+apt-get -qq update && apt-get -qq install -y yarn >/dev/null
 
 # Install Kibana from https://www.elastic.co/downloads/kibana-oss
 pushd .
@@ -377,7 +404,7 @@ package.json:
 yarn start --oss
 
 copy
-popd >/dev/nul
+popd >/dev/null
 rm -rf $SRCPATH/kibana
 
 cat >/lib/systemd/system/kibana.service <<EOF
@@ -415,7 +442,7 @@ export PATH=$PATH:/usr/local/go/bin:$SRCROOTPATH/bin
 go version
 
 # Install other tools
-apt-get -qq install -y git gcc make python-pip >/dev/nul
+apt-get -qq install -y git gcc make python-pip >/dev/null
 pip install virtualenv
 go get github.com/magefile/mage
 
@@ -442,7 +469,7 @@ cp filebeat.yml /etc/filebeat/
 chmod 750 /var/log/filebeat
 chmod 750 /etc/filebeat/
 chown -R root:root /usr/share/filebeat/*
-popd >/dev/nul
+popd >/dev/null
 
 # Deploy Filebeat
 cat >/lib/systemd/system/filebeat.service <<EOF
@@ -468,7 +495,7 @@ sed -i \
 	/etc/filebeat/filebeat.yml
 
 if [ `service filebeat status | grep Active | awk '{ print $2 }'` != 'active' ]; then
-	systemctl enable filebeat.service 2>/dev/nul
+	systemctl enable filebeat.service 2>/dev/null
 	service filebeat start
 else
 	service filebeat restart
@@ -515,5 +542,5 @@ systemctl enable metricbeat.service
 service metricbeat start
 service metricbeat status
 
-popd >/dev/nul
+popd >/dev/null
 rm -rf $SRCPATH/beats
