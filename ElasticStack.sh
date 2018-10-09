@@ -59,7 +59,8 @@ else
 	service zram restart
 fi
 
-apt-get -qq install -y openjdk-8-jdk curl >/dev/nul
+apt-get -qq install -y oracle-java8-jdk curl >/dev/nul
+update-java-alternatives -s jdk-8-oracle-arm32-vfp-hflt >/dev/nul
 
 
 #
@@ -81,10 +82,10 @@ rm elasticsearch/lib/jna-4.5.1.jar
 wget -O elasticsearch/lib/jna-4.5.2.jar https://repo1.maven.org/maven2/net/java/dev/jna/jna/4.5.2/jna-4.5.2.jar -q --show-progress
 
 # Set up JVM
-set JVM_OPT_PATH=elasticsearch/config/jvm.options
+export JVM_OPT_PATH=elasticsearch/config/jvm.options
 sed -i \
-	-e "s/^-Xms.*$/-Xms200m/" \
-	-e "s/^-Xmx.*$/-Xmx500m/" \
+	-e "s/^-Xms.*$/-Xms384m/" \
+	-e "s/^-Xmx.*$/-Xmx512m/" \
 	-e "s/^[ #]*-Delasticsearch.json.allow_unquoted_field_names.*$/-Delasticsearch.json.allow_unquoted_field_names=true/" \
 	$JVM_OPT_PATH
 if [ $IS32BIT ]; then
@@ -150,8 +151,7 @@ fi
 
 # Wait for the server to start before testing
 echo "Elastic search service:" `service elasticsearch status | grep Active | awk '{ print $2 }'`
-echo "Waiting for 10 minutes for initialization."
-sleep 10m
+sleep 1m
 echo "Elastic search status: " `curl -s http://$ELKHOST:9200/_cat/health | awk '{ print $4 }'`
 
 
@@ -198,10 +198,10 @@ popd >/dev/nul
 rm -rf $SRCPATH/jnr
 
 # Set up JVM
-set JVM_OPT_PATH=logstash/config/jvm.options
+export JVM_OPT_PATH=logstash/config/jvm.options
 sed -i \
-	-e "s/^-Xms.*$/-Xms256m/" \
-	-e "s/^-Xmx.*$/-Xmx256m/" \
+	-e "s/^-Xms.*$/-Xms384m/" \
+	-e "s/^-Xmx.*$/-Xmx384m/" \
 	-e "s/^.*-Djava\.io\.tmpdir.*$/-Djava.io.tmpdir=\/media\/logstash\/tmp/" \
 	$JVM_OPT_PATH
 mkdir -p /media/logstash/tmp
@@ -232,12 +232,13 @@ echo "`date`: Logstash $ELKVERSION is installed and running" | \
 curl -s http://$ELKHOST:9200/logstash-*/_search?pretty | \
 	grep "is installed and running" | \
 	tail -n 1
-set ENTRYID=`curl -s http://$ELKHOST:9200/logstash-*/_search?pretty | grep "_id" | awk '{ gsub(/[",]/, "", $3); print $3 }'`
+export ENTRYID=`curl -s http://$ELKHOST:9200/logstash-*/_search?pretty | grep "_id" | awk '{ gsub(/[",]/, "", $3); print $3 }'`
 curl -X DELETE "$ELKHOST:9200/logstash-`date +%Y.%m.%d`/_doc/$ENTRYID?pretty"
 	
 # Set up pipelines
 mkdir -p /etc/logstash/conf.d
 chown -R logstash:logstash /etc/logstash/conf.d
+
 cat >/etc/logstash/conf.d/beat.conf <<EOF
 input {
   beats { port => "$BEATSPORT" }
@@ -245,7 +246,7 @@ input {
 output {
   elasticsearch {
     hosts => ["$ELKHOST:9200"]
-    index => "%{[@metadata][beat]-%{+YYYY.MM.dd}}"
+    index => "%{[@metadata][beat]}-%{+YYYY.MM.dd}"
   }
 }
 EOF
@@ -262,11 +263,19 @@ filter {
   if [type] == "syslog" {
     grok {
       match => { "message" => "%{SYSLOGTIMESTAMP:syslog_timestamp} %{SYSLOGHOST:syslog_hostname} %{DATA:syslog_program}(?:\[%{POSINT:syslog_pid}\])?: %{GREEDYDATA:syslog_message}" }
-      add_field => [ "received_at", "%{@timestamp}" ]
-      add_field => [ "received_from", "%{host}" ]
+    }
+    grok {
+      match => { "syslog_message" => "\[%{TIMESTAMP_ISO8601:syslog_iso_timestamp}.*" }
     }
     date {
+	  locale => "en"
       match => [ "syslog_timestamp", "MMM  d HH:mm:ss", "MMM dd HH:mm:ss" ]
+      target => "entry_time"
+    }
+    date {
+	  locale => "en"
+      match => [ "syslog_iso_timestamp", "ISO8601" ]
+      target => "entry_time"
     }
   }
 }
@@ -283,8 +292,10 @@ EOF
 
 cat >>/usr/bin/logstash/config/pipelines.yml <<EOF
  - pipeline.id: beats
+   pipeline.workers: 1
    path.config: "/etc/logstash/conf.d/beat.conf"
  - pipeline.id: syslog
+   pipeline.workers: 1
    path.config: "/etc/logstash/conf.d/syslog.conf"
 EOF
 
@@ -315,6 +326,7 @@ sleep 60m
 curl http://$ELKHOST:9600/?pretty
 
 
+exit
 #
 # Kibana
 #
