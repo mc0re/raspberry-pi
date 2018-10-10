@@ -271,7 +271,6 @@ output {
 }
 EOF
 
-chmod o+r /var/log/syslog
 cat >/etc/logstash/conf.d/syslog.conf <<EOF
 input {
   file {
@@ -301,6 +300,7 @@ filter {
 }
 output {
   if [message] =~ /elasticsearch.*\[INFO/ {
+  } else if [message] =~ /run-parts --report \/etc\/cron./ {
   } else {
     elasticsearch {
       hosts => ["$ELKHOST:9200"]
@@ -309,6 +309,7 @@ output {
   }
 }
 EOF
+chmod o+r /var/log/syslog
 
 cat >>/usr/bin/logstash/config/pipelines.yml <<EOF
  - pipeline.id: beats
