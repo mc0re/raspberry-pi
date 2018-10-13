@@ -347,8 +347,6 @@ sleep 60m
 curl http://$ELKHOST:9600/?pretty
 
 
-exit
-
 #
 # Curator - for data clean-up
 # From https://www.elastic.co/guide/en/elasticsearch/client/curator/current/index.html
@@ -361,8 +359,6 @@ exit
 
 # Install Node.JS via apt-get, only gets the latest version
 #curl -sL https://deb.nodesource.com/setup_8.x | sudo -E bash -
-#apt-get install -y nodejs@8.11.4-1nodesource1
-
 # Install Node.JS from https://deb.nodesource.com/node_8.x/pool/main/n/nodejs/
 pushd .
 cd ~
@@ -377,55 +373,60 @@ apt-get -qq install -y npm >/dev/null
 npm install npm -g
 npm install -g eslint-plugin-import@2.8.0
 
-# Install Yarn
-curl -sL https://dl.yarnpkg.com/debian/pubkey.gpg | apt-key add -
-echo "deb https://dl.yarnpkg.com/debian/ stable main" | tee /etc/apt/sources.list.d/yarn.list
-apt-get -qq update && apt-get -qq install -y yarn >/dev/null
-
-# Install Kibana from https://www.elastic.co/downloads/kibana-oss
+# Install Kibana
 pushd .
-mkdir -p $SRCPATH
-cd $SRCPATH
-git clone https://github.com/elastic/kibana.git
-cd kibana
-git checkout $ELKVERSION
-# This one runs for over 1 hour
-yarn kbn bootstrap
+cd ~
+wget https://artifacts.elastic.co/downloads/kibana/kibana-oss-$ELKVERSION-linux-x86_64.tar.gz  -q --show-progress
+tar xzf kibana-oss-$ELKVERSION-linux-x86_64.tar.gz
+rm kibana-oss-$ELKVERSION-linux-x86_64.tar.gz
+mv kibana-$ELKVERSION-linux-x86_64 kibana
 
-package.json:
-	dependencies:
-	add "eslint-plugin-import": "2.8.0",
-	add "react-router": "^4.2.0",
-	change "ngreact": "0.5.0",
-	delete "@elastic/eui": "3.0.6",
-	delete "x-pack"
-	devDependencies:
-	delete "chromedriver": "2.41.0",
-
-yarn start --oss
-
-copy
+# Make Kibana use pre-installed Node.JS instead of its own
+rm -rf kibana/node/
+mv kibana /usr/bin/kibana
 popd >/dev/null
-rm -rf $SRCPATH/kibana
 
+# Set up Kibana
+sed -i \
+	-e "s/^[ #]*server.host:.*$/server.host: \"0.0.0.0\"/" \
+	-e "s/^[ #]*server.name:.*$/server.name: \"$ELKHOST\"/" \
+	-e "s/^[ #]*elasticsearch.url:.*$/elasticsearch.url: \"http:\/\/$ELKHOST:9200\"/" \
+	-e "s/^[ #]*logging.dest:.*$/logging.dest: \/var\/log\/kibana/" \
+	/usr/bin/kibana/config/kibana.yml
+
+
+# Install Yarn
+#curl -sL https://dl.yarnpkg.com/debian/pubkey.gpg | apt-key add -
+#echo "deb https://dl.yarnpkg.com/debian/ stable main" | tee /etc/apt/sources.list.d/yarn.list
+#apt-get -qq update && apt-get -qq install -y yarn >/dev/null
+
+# Install as a service
+adduser --system --group --home /media/kibana --quiet kibana
+mkdir -p /var/log/kibana
+chown -R kibana:kibana /var/log/kibana /usr/bin/kibana /media/kibana
 cat >/lib/systemd/system/kibana.service <<EOF
 [Unit]
 Description=Kibana
 [Service]
-ExecStart=/opt/kibana/bin/kibana
+User=kibana
+ExecStart=/usr/bin/kibana/bin/kibana
 StandardOutput=null
 [Install]
 WantedBy=multi-user.target
 EOF
 
-nano /opt/kibana/config/kibana.yml
-#server.host: "$ELKHOST"
-#elasticsearch.url: http://$ELKHOST:9200
-#Remove the # at the front of the server.port setting found at the top of the file
+if [ `service kibana status | grep Active | awk '{ print $2 }'` != 'active' ]; then
+	systemctl enable kibana.service 2>/dev/null
+	service kibana start
+else
+	service kibana restart
+fi
 
-systemctl enable kibana.service
-service kibana start
-service kibana status
+# Wait for the server to start before testing
+echo "Kibana service:" `service kibana status | grep Active | awk '{ print $2 }'`
+sleep 2m
+echo "Kibana status: " `tail -n 1 /var/log/kibana/kibana.log | awk -F , '{ print $7 }' | awk -F : '{ gsub(/"/, "", $2); print $2 }'`
+
 
 
 #
@@ -535,7 +536,7 @@ WantedBy=multi-user.target
 EOF
 
 nano /etc/metricbeat/metricbeat.yml
-#-- Set up Logstash host to $ELKHOST and enabled metrics
+#-- Set up Logstash host to $ELKHOST and enabled metrics, period=1m or more.
 
 /usr/share/metricbeat/bin/metricbeat setup -e -E output.elasticsearch.hosts=... -E setup.kibana.host=...
 
