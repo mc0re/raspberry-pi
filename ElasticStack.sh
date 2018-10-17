@@ -362,7 +362,7 @@ curl http://$ELKHOST:9600/?pretty
 # Install Node.JS from https://deb.nodesource.com/node_8.x/pool/main/n/nodejs/
 pushd .
 cd ~
-wget https://deb.nodesource.com/node_8.x/pool/main/n/nodejs/nodejs_8.11.4-1nodesource1_armhf.deb
+wget https://deb.nodesource.com/node_8.x/pool/main/n/nodejs/nodejs_8.11.4-1nodesource1_armhf.deb -q --show-progress
 dpkg -i nodejs_8.11.4-1nodesource1_armhf.deb
 rm nodejs_8.11.4-1nodesource1_armhf.deb
 node -v
@@ -376,7 +376,7 @@ npm install -g eslint-plugin-import@2.8.0
 # Install Kibana
 pushd .
 cd ~
-wget https://artifacts.elastic.co/downloads/kibana/kibana-oss-$ELKVERSION-linux-x86_64.tar.gz  -q --show-progress
+wget https://artifacts.elastic.co/downloads/kibana/kibana-oss-$ELKVERSION-linux-x86_64.tar.gz -q --show-progress
 tar xzf kibana-oss-$ELKVERSION-linux-x86_64.tar.gz
 rm kibana-oss-$ELKVERSION-linux-x86_64.tar.gz
 mv kibana-$ELKVERSION-linux-x86_64 kibana
