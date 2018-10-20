@@ -2,6 +2,8 @@
 # PINAME - the name of the device
 # NASNAME - account name for accessing NAS
 # NASPASSWORD - account password for accessing NAS
+# VPNNAME - account name for PIA VPN
+# VPNPASSWORD - account password for PIA VPN
 touch vars.sh
 chmod u+x vars.sh
 . vars.sh
@@ -73,3 +75,6 @@ cat >>/etc/fstab << EOF
 EOF
 mount -a
 fi
+
+# Set up check disk
+sed -i '/rootfstype=ext4/ s/$/ fsck.mode=force/' /boot/cmdline.txt
